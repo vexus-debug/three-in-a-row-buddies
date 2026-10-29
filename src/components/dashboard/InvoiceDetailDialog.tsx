@@ -8,11 +8,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "@/hooks/use-toast";
-import { Printer, CreditCard, Loader2, Mail, MessageCircle, Building2, Phone, MapPin, Globe, Pencil, X, Save, Plus, Trash2 } from "lucide-react";
+import { Printer, CreditCard, Loader2, Mail, MessageCircle, Building2, Phone, MapPin, Globe, Pencil, X, Save, Plus, Trash2, History, ShieldCheck } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { supabase } from "@/integrations/supabase/client";
 import { useInvoiceItems, useUpdateInvoice } from "@/hooks/useInvoices";
 import { usePayments, useRecordPayment } from "@/hooks/usePayments";
 import { useClinicSettings } from "@/hooks/useClinicSettings";
 import type { InvoiceWithPatient } from "@/hooks/useInvoices";
+import { InvoiceAdjustmentsPanel } from "@/components/dashboard/InvoiceAdjustmentsPanel";
+import { InvoiceAuditDrawer } from "@/components/dashboard/InvoiceAuditDrawer";
+import { PatientCreditBalanceCard } from "@/components/dashboard/PatientCreditBalanceCard";
+import { CreateClaimModal } from "@/components/dashboard/CreateClaimModal";
+import { invoiceBalance } from "@/lib/arAging";
+import { dentalLineMeta } from "@/lib/billingDisplay";
 import logo from "@/assets/logo.jpg";
 
 interface InvoiceDetailDialogProps {
@@ -25,7 +33,11 @@ function formatCurrency(amount: number) {
   return `₦${amount.toLocaleString()}`;
 }
 
-function getInvoiceHTML(invoice: InvoiceWithPatient, lineItems: any[], payments: any[], clinic: any, balance: number) {
+function escapeHtml(s: string) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+}
+
+function getInvoiceHTML(invoice: InvoiceWithPatient, lineItems: any[], payments: any[], clinic: any, balance: number, providers: Record<string, string> = {}) {
   const clinicName = clinic?.name || clinic?.clinic_name || "Clinexus";
   const clinicPhone = clinic?.phone || "";
   const clinicAddress = clinic?.address || "";
@@ -34,14 +46,17 @@ function getInvoiceHTML(invoice: InvoiceWithPatient, lineItems: any[], payments:
   const brand = clinic?.settings?.primary_color || "#0891b2";
   const brandAccent = clinic?.settings?.accent_color || brand;
 
-  const rows = lineItems.map(item =>
-    `<tr>
-      <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb">${item.description}</td>
+  const rows = lineItems.map(item => {
+    const meta = dentalLineMeta(item);
+    const provider = item.provider_id ? providers[item.provider_id] : null;
+    const sub = [meta, provider ? `Dr. ${provider}` : null].filter(Boolean).map((s) => escapeHtml(s as string)).join(" &middot; ");
+    return `<tr>
+      <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb">${escapeHtml(item.description)}${sub ? `<div style="font-size:11px;color:#6b7280;margin-top:2px;font-family:'Courier New',monospace">${sub}</div>` : ""}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;text-align:center">${item.quantity}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;text-align:right">₦${item.unit_price.toLocaleString()}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:600">₦${item.line_total.toLocaleString()}</td>
-    </tr>`
-  ).join("");
+    </tr>`;
+  }).join("");
 
   const payRows = payments.map(p =>
     `<tr>
@@ -158,10 +173,23 @@ export function InvoiceDetailDialog({ open, onOpenChange, invoice }: InvoiceDeta
   const recordPayment = useRecordPayment();
   const updateInvoice = useUpdateInvoice();
   const { data: clinic } = useClinicSettings();
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [claimOpen, setClaimOpen] = useState(false);
+  const providerIds = [...new Set(lineItems.map((li) => li.provider_id).filter(Boolean))] as string[];
+  const { data: providers = {} } = useQuery({
+    queryKey: ["invoice_providers", providerIds.join(",")],
+    enabled: providerIds.length > 0,
+    queryFn: async () => {
+      const { data } = await (supabase as any).from("profiles").select("id, full_name").in("id", providerIds);
+      const map: Record<string, string> = {};
+      (data || []).forEach((p: any) => { if (p.full_name) map[p.id] = p.full_name; });
+      return map;
+    },
+  });
 
   if (!invoice) return null;
 
-  const balance = invoice.total_amount - invoice.amount_paid;
+  const balance = invoiceBalance(invoice);
 
   const startEditing = () => {
     setEditDiscount(invoice.discount_percent);
@@ -231,7 +259,7 @@ export function InvoiceDetailDialog({ open, onOpenChange, invoice }: InvoiceDeta
   };
 
   const handlePrint = () => {
-    const html = getInvoiceHTML(invoice, lineItems, payments, clinic, balance);
+    const html = getInvoiceHTML(invoice, lineItems, payments, clinic, balance, providers);
     const w = window.open("", "_blank");
     w?.document.write(html);
     w?.document.close();
@@ -367,14 +395,26 @@ export function InvoiceDetailDialog({ open, onOpenChange, invoice }: InvoiceDeta
                     </tr>
                   </thead>
                   <tbody>
-                    {lineItems.map((item) => (
+                    {lineItems.map((item) => {
+                      const meta = dentalLineMeta(item);
+                      const provider = item.provider_id ? providers[item.provider_id] : null;
+                      return (
                       <tr key={item.id} className="border-t border-border/50">
-                        <td className="py-2.5 px-3 font-medium">{item.description}</td>
+                        <td className="py-2.5 px-3 font-medium">
+                          {item.description}
+                          {(meta || provider) && (
+                            <div className="mt-0.5 flex flex-wrap gap-1.5 text-[10px] font-normal text-muted-foreground">
+                              {meta && <span className="rounded bg-muted px-1.5 py-0.5 font-mono">{meta}</span>}
+                              {provider && <span>Dr. {provider}</span>}
+                            </div>
+                          )}
+                        </td>
                         <td className="text-center py-2.5 px-3">{item.quantity}</td>
                         <td className="text-right py-2.5 px-3 text-muted-foreground">{formatCurrency(item.unit_price)}</td>
                         <td className="text-right py-2.5 px-3 font-semibold">{formatCurrency(item.line_total)}</td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -401,6 +441,12 @@ export function InvoiceDetailDialog({ open, onOpenChange, invoice }: InvoiceDeta
                 <span className="text-muted-foreground">Paid</span>
                 <span className="text-emerald-600 font-medium">{formatCurrency(invoice.amount_paid)}</span>
               </div>
+              {Number(invoice.adjustments_total || 0) > 0 && (
+                <div className="flex justify-between text-xs">
+                  <span className="text-muted-foreground">Adjustments</span>
+                  <span className="font-medium">-{formatCurrency(Number(invoice.adjustments_total))}</span>
+                </div>
+              )}
               <div className="flex justify-between font-bold text-sm pt-1 border-t">
                 <span>Balance Due</span>
                 <span className={balance > 0 ? "text-red-600" : "text-emerald-600"}>{formatCurrency(balance)}</span>
@@ -429,6 +475,9 @@ export function InvoiceDetailDialog({ open, onOpenChange, invoice }: InvoiceDeta
               <p className="text-xs text-muted-foreground bg-muted/20 rounded-lg p-3 text-center">No payments recorded yet.</p>
             )}
           </div>
+
+          {/* Write-offs & adjustments */}
+          <InvoiceAdjustmentsPanel invoiceId={invoice.id} balance={balance} />
 
           {/* Record payment form */}
           {showPayment && balance > 0 && (
@@ -462,6 +511,9 @@ export function InvoiceDetailDialog({ open, onOpenChange, invoice }: InvoiceDeta
                     Pay Full Balance ({formatCurrency(balance)})
                   </Button>
                 </div>
+                {invoice.patient_id && (
+                  <PatientCreditBalanceCard patientId={invoice.patient_id} invoiceId={invoice.id} balanceDue={balance} />
+                )}
               </div>
             </>
           )}
@@ -491,6 +543,14 @@ export function InvoiceDetailDialog({ open, onOpenChange, invoice }: InvoiceDeta
               <Button variant="outline" size="sm" onClick={handleWhatsApp}>
                 <MessageCircle className="mr-1.5 h-3.5 w-3.5" />WhatsApp
               </Button>
+              <Button variant="outline" size="sm" onClick={() => setAuditOpen(true)}>
+                <History className="mr-1.5 h-3.5 w-3.5" />History
+              </Button>
+              {balance > 0 && lineItems.length > 0 && (
+                <Button variant="outline" size="sm" onClick={() => setClaimOpen(true)}>
+                  <ShieldCheck className="mr-1.5 h-3.5 w-3.5" />Insurance claim
+                </Button>
+              )}
               {balance > 0 && (
                 <Button size="sm" onClick={() => setShowPayment(!showPayment)} className="bg-secondary hover:bg-secondary/90">
                   <CreditCard className="mr-1.5 h-3.5 w-3.5" />Record Payment
@@ -499,6 +559,13 @@ export function InvoiceDetailDialog({ open, onOpenChange, invoice }: InvoiceDeta
             </>
           )}
         </DialogFooter>
+        <InvoiceAuditDrawer invoiceId={invoice.id} open={auditOpen} onOpenChange={setAuditOpen} />
+        <CreateClaimModal
+          open={claimOpen}
+          onOpenChange={setClaimOpen}
+          invoice={{ id: invoice.id, patient_id: invoice.patient_id, invoice_number: invoice.invoice_number, balance }}
+          items={lineItems}
+        />
       </DialogContent>
     </Dialog>
   );
