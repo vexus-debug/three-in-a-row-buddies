@@ -18,6 +18,9 @@ import { EmptyState } from "@/components/dashboard/EmptyState";
 import { AnimatedCounter } from "@/components/dashboard/AnimatedCounter";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ClaimsTable } from "@/components/dashboard/ClaimsTable";
+import { summarizeAging, invoiceBalance, AGING_LABELS, type AgingBucket } from "@/lib/arAging";
 
 const statusStyles: Record<string, string> = {
   paid:    "bg-emerald-500/10 text-emerald-700 border-emerald-500/20",
@@ -51,6 +54,8 @@ export default function BillingPage() {
 
   const { data: invoices = [], isLoading } = useInvoices();
   const { data: stats } = useBillingStats();
+  const aging = useMemo(() => summarizeAging(invoices), [invoices]);
+
 
   const readyForPayment = useMemo(
     () => invoices.filter((inv: any) => inv.status === "pending" && String(inv.notes || "").startsWith("Ready for payment")),
@@ -210,6 +215,27 @@ export default function BillingPage() {
         ))}
       </motion.div>
 
+      {/* ── A/R aging ── */}
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4" data-tour="billing-aging">
+        {(Object.keys(AGING_LABELS) as AgingBucket[]).map((b) => (
+          <Card key={b} className={cn("bg-card", b === "90_plus" && aging[b].amount > 0 && "border-destructive/40")}>
+            <CardContent className="p-4">
+              <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">{AGING_LABELS[b]}</p>
+              <p className={cn("text-xl font-bold tabular-nums mt-1", b === "90_plus" && aging[b].amount > 0 ? "text-destructive" : "text-foreground")}>
+                {formatCurrency(aging[b].amount)}
+              </p>
+              <p className="text-xs text-muted-foreground">{aging[b].count} invoice{aging[b].count === 1 ? "" : "s"}</p>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <Tabs defaultValue="invoices">
+        <TabsList>
+          <TabsTrigger value="invoices">Invoices</TabsTrigger>
+          <TabsTrigger value="claims">Claims</TabsTrigger>
+        </TabsList>
+        <TabsContent value="invoices" className="mt-4 space-y-5">
       {/* ── Filter Toolbar ── */}
       <div className="flex flex-col sm:flex-row gap-3" data-tour="billing-filters">
         <div className="relative flex-1" data-tour="billing-search">
@@ -280,7 +306,7 @@ export default function BillingPage() {
                     </thead>
                     <tbody>
                       {paginated.map((inv, i) => {
-                        const balance = inv.total_amount - inv.amount_paid;
+                        const balance = invoiceBalance(inv);
                         return (
                           <motion.tr
                             key={inv.id}
@@ -354,6 +380,11 @@ export default function BillingPage() {
           </CardContent>
         </Card>
       </motion.div>
+        </TabsContent>
+        <TabsContent value="claims" className="mt-4">
+          <ClaimsTable />
+        </TabsContent>
+      </Tabs>
 
       <CreateInvoiceDialog open={invoiceOpen} onOpenChange={setInvoiceOpen} />
       <InvoiceDetailDialog open={!!selectedInvoice} onOpenChange={(open) => !open && setSelectedInvoice(null)} invoice={selectedInvoice} />
